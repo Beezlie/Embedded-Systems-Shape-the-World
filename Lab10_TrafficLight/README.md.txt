@@ -1,0 +1,3 @@
+-Talk about purpose of lab
+-display code solution
+-show the state table
