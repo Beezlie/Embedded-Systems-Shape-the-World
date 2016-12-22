@@ -9,21 +9,22 @@ Project File Date:  12/29/2014
 <h2>Output:</h2>
 Build target 'SpaceInvaders'
 compiling SpaceInvaders.c...
-SpaceInvaders.c(506): warning:  #550-D: variable "delay" was set but never used
+SpaceInvaders.c(445): warning:  #68-D: integer conversion resulted in a change of sign
+                                enemyDir = (-1)*currentLevel;           // reverse enemy direction (move left)
+SpaceInvaders.c(930): warning:  #550-D: variable "delay" was set but never used
         unsigned long delay;
-SpaceInvaders.c(546): warning:  #550-D: variable "delay" was set but never used
+SpaceInvaders.c(967): warning:  #550-D: variable "delay" was set but never used
         unsigned long delay;
-SpaceInvaders.c(583): warning:  #550-D: variable "delay" was set but never used
+SpaceInvaders.c(989): warning:  #550-D: variable "delay" was set but never used
         unsigned long delay;
-SpaceInvaders.c(598): warning:  #550-D: variable "delay" was set but never used
-        unsigned long delay;
-SpaceInvaders.c: 4 warnings, 0 errors
+SpaceInvaders.c(1014): warning:  #177-D: variable "i" was declared but never referenced
+        int i;
+SpaceInvaders.c: 5 warnings, 0 errors
 linking...
-Program Size: Code=5248 RO-data=5076 RW-data=100 ZI-data=1908  
-".\SpaceInvaders.axf" - 0 Error(s), 4 Warning(s).
-: Error: L6200E: Symbol Count multiply defined (by texas.o and spaceinvaders.o).
-Not enough information to list image symbols.
-Not enough information to list the image map.
-Finished: 2 information, 0 warning and 1 error messages.
-".\SpaceInvaders.axf" - 1 Error(s), 4 Warning(s).
-Target not created
+Program Size: Code=11028 RO-data=20736 RW-data=128 ZI-data=2840  
+".\SpaceInvaders.axf" - 0 Error(s), 5 Warning(s).
+Load "C:\\Keil\\Labware\\Lab15_SpaceInvaders\\SpaceInvaders.axf" 
+Connecting: Mode=JTAG, Speed=1000000Hz
+Erase Done.
+Programming Done.
+Verify OK.

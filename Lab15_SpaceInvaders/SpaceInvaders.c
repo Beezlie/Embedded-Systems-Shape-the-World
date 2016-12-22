@@ -72,28 +72,37 @@
 #include "Nokia5110.h"
 #include "Random.h"
 #include "TExaS.h"
+#include "Sound.h"
 
-void DisableInterrupts(void); // Disable interrupts
-void EnableInterrupts(void);  // Enable interrupts
+void DisableInterrupts(void);	  // Disable interrupts
+void EnableInterrupts(void);  	// Enable interrupts
+void missLEDOn(void); 					// turn on missile activated light
+void missLEDOff(void);					// signals now able to launch another missile
+void lasLEDOn(void); 					// turn on laser activated light
+void lasLEDOff(void);					// signals now able to launch another laser
 unsigned long TimerCount;
-unsigned long ADCdata;    // 12-bit 0 to 4095 sample
+unsigned long ADCdata;    			// 12-bit 0 to 4095 sample
 unsigned long Semaphore2A = 0;
-unsigned long playerFlag = 0;
-unsigned long missileFlag = 0;
+unsigned long playerFlag = 0;		// signals whether the player has moved their ship
 unsigned long laserFlag = 0;
-unsigned long FrameCount = 0;
-const int SineWave[64] = // sine wave ranging for 0 to 15 with 256 samples
-{8,8,9,10,10,11,12,12,13,13,14,14,14,15,15,15,15,15,15,15,14,14,14,13,13,12,11,11,10,9,
-9,8,7,6,6,5,4,4,3,2,2,1,1,1,0,0,0,0,0,0,0,1,1,1,2,2,3,3,4,5,5,6,7,8};
+unsigned long missileFlag = 0;
+unsigned long FrameCount = 0;		// switching FrameCount between 0 and 1 allows for image to be animated
+//const int SineWave[64] = 				// sine wave ranging for 0 to 15 with 256 samples
+//{8,8,9,10,10,11,12,12,13,13,14,14,14,15,15,15,15,15,15,15,14,14,14,13,13,12,11,11,10,9,
+//9,8,7,6,6,5,4,4,3,2,2,1,1,1,0,0,0,0,0,0,0,1,1,1,2,2,3,3,4,5,5,6,7,8};
 const int ExplosionSound[1];
 const int MissileSound[1];	
 const int LaserSound[1];
 const int DamageSound[1];
-unsigned long Index = 0;    // index into array
-const unsigned char *Wave;  // pointer to array
-unsigned long Counter = 0;    // number of points (0 means no sound)
-unsigned int playerPosition;
-	
+unsigned int playerPosition;		// updated with the x-position of the player's ship during Systick interrupt (30 Hz)
+unsigned int randomnum;					// used to randomize enemy projectiles	
+unsigned int currentLevel;
+unsigned int numEnemies = 8;
+unsigned int playMissile = 8;
+unsigned int playLaser = 8;
+signed int enemyDir = 1;		// initialize the enemy directions as positive (enemies move right)
+unsigned int enemyDrop = 0;
+
 
 // *************************** Images ***************************
 // enemy ship that starts at the top of the screen (arms/mouth closed)
@@ -336,158 +345,489 @@ const unsigned char Laser1[] = {
 #define PLAYERW     ((unsigned char)PlayerShip0[18])
 #define PLAYERH     ((unsigned char)PlayerShip0[22])
 
+// Used to define all objects in the game
 struct State {
-  unsigned long x;      // x coordinate
-	unsigned long hitbox[2]; // range of x and y values
-  unsigned long y;      // y coordinate
-  const unsigned char *image[2]; // ptr->image
-  long life;            // 0=dead, 1=alive
+  unsigned long x;      						// x coordinate
+	unsigned long maxpoint[2]; 					// range of x and y values
+  unsigned long y;      						// y coordinate
+  const unsigned char *image[4]; 		// ptr->image
+  long life;            						// 0=dead, 1=alive
+	unsigned long deathCounter;				// number of cycles to show the explosion BMP image
 };          
 typedef struct State STyp;
-STyp Enemy[4];
+STyp Enemy[8];					// 4 enemies
 STyp Bunker;
 STyp Player;
-STyp Missile;
-STyp Laser;
+STyp Missile[9];				// 5 missiles -  4 enemy missiles and 1 player missile
+STyp Laser[9];					// 5 lasers -  4 enemy lasers and 1 player laser
+STyp UFO;
 
+void UFO_Init(void) {
+	UFO.x = 0;			// 
+	UFO.y = 10;	// 
+	UFO.maxpoint[0] = UFO.x + ENEMYBONUSW;
+	UFO.maxpoint[1] = UFO.y + ENEMYBONUSH;
+	UFO.image[0] = SmallEnemyBonus0;	// no damage
+	UFO.image[1] = SmallExplosion0;	// explosion
+	UFO.life = 1;
+	UFO.deathCounter = 3;
+	Sound_Highpitch();
+}
+
+void UFO_Move(void) {
+	if(UFO.life > 0 && UFO.x < 82) {
+		UFO.x += 3;
+		UFO.maxpoint[0] += 3;
+	} else {
+		UFO.life = 0;
+	}
+}
+
+// **************Top_Enemy_Init*********************
+// Initialize all enemies.  The maxpoint is used to define the range
+// of x and y values that the enemy occupies.
+// Input: none
+// Output: none
 void Enemy_Init(void){ int i;
-  for(i=0;i<4;i++){
-    Enemy[i].x = 20*i;
-		Enemy[i].y = 10;
-		Enemy[i].hitbox[0] = Enemy[i].x + ENEMY30W;
-		Enemy[i].hitbox[1] = Enemy[i].y + ENEMY30H;
-    Enemy[i].image[0] = SmallEnemy30PointA;
-    Enemy[i].image[1] = SmallEnemy30PointB;
+  for(i=0;i<numEnemies;i++){
+    Enemy[i].x = 15*(i%4);														// enemies separated by 15 pixels in x direction
+		if(i < 4) {
+			Enemy[i].y = 10;			// first row of enemies
+			Enemy[i].maxpoint[0] = Enemy[i].x + ENEMY30W;		// max x-coordinate the enemy currently occupies
+			Enemy[i].maxpoint[1] = Enemy[i].y + ENEMY30H;		// max y-coordinate the enemy currently occupies
+			// enemy image alternates to allow for animation
+			Enemy[i].image[0] = SmallEnemy30PointA;
+			Enemy[i].image[1] = SmallEnemy30PointB;
+		} else if(i >=4 || i < 8) {
+			Enemy[i].y = 10 + ENEMY30H;					// second row of enemies												
+			Enemy[i].maxpoint[0] = Enemy[i].x + ENEMY10W;		// max x-coordinate the enemy currently occupies
+			Enemy[i].maxpoint[1] = Enemy[i].y + ENEMY10H;		// max y-coordinate the enemy currently occupies
+			// enemy image alternates to allow for animation
+			Enemy[i].image[0] = SmallEnemy10PointA;
+			Enemy[i].image[1] = SmallEnemy10PointB;
+		} else {
+			Enemy[i].y = 10 + ENEMY30H + ENEMY20H;		// third row of enemies													
+			Enemy[i].maxpoint[0] = Enemy[i].x + ENEMY20W;		// max x-coordinate the enemy currently occupies
+			Enemy[i].maxpoint[1] = Enemy[i].y + ENEMY20H;		// max y-coordinate the enemy currently occupies
+			// enemy image alternates to allow for animation
+			Enemy[i].image[0] = SmallEnemy20PointA;
+			Enemy[i].image[1] = SmallEnemy20PointB;
+		}
     Enemy[i].life = 1;
+		Enemy[i].deathCounter = 3;										// counts down time to display explosion before displaying blank space
    }
 }
 
-void Enemy_Move(void){ int i;
-  for(i=0;i<4;i++){
-    if((Enemy[i].x <= Missile.x) && (Missile.x <= Enemy[i].hitbox[0]) && (Enemy[i].y <= Missile.y) && (Missile.y <= Enemy[i].hitbox[1])){
-      Enemy[i].life = 0;
-			Enemy[i].image[0] = BigExplosion0;
-    }else{
-			Enemy[i].x += 0; // move to right
-			Enemy[i].hitbox[0] += 0; // move to right
-    }
-  }
+// **************Enemy_Move*********************
+// Move the enemies back and forth in the x-direction. If an enemy
+// reaches the edge of the screen (width = 84 pixels), the direction 
+// of movement is reversed.  A positive enemyDir causes an enemy to move 
+// right and a negative enemyDir moves them left.  If the direction is 
+// reversed, the enemies move down.
+// Input: none
+// Output: none
+void Enemy_Move(void){ 
+	int i;
+	int minY = 48;
+	for(i=0;i<numEnemies;i++) {
+			Enemy[i].x += enemyDir; 		// move the enemy along x-direction
+			Enemy[i].maxpoint[0] += enemyDir; // move the enemy maxpoint along x-direction
+			Enemy[i].y += enemyDrop;		// move the enemy down 
+			Enemy[i].maxpoint[1] += enemyDrop;   // move the enmy maxpoint down 
+			if(Enemy[i].y < minY) {
+				minY = Enemy[i].y;
+			}
+	}
+	enemyDrop = 0;
+  for(i=0;i<numEnemies;i++){
+		if(Enemy[i].life > 0) {
+			if(Enemy[i].maxpoint[0] >= 82) {
+				enemyDir = (-1)*currentLevel;		// reverse enemy direction (move left)
+				enemyDrop = 2;		// drop all enemies down by 1 pixel
+			}
+			if(Enemy[i].x <= 0) {
+				enemyDir = 1*currentLevel;			// reverse enemy direction (move right)
+				enemyDrop = 2;		// drop all enemies down by 1 pixel
+			}
+		}
+	}
+	if(minY > 20 && UFO.life <= 0 && randomnum > 8 && randomnum <= 10) {
+		UFO_Init();
+	}
 }
 
+// **************Bunker_Init*********************
+// Initialize the bunker which is used to shield the player's
+// ship from enemy fire.
+// Input: none
+// Output: none
 void Bunker_Init(void){
-	Bunker.x = 33;
-	Bunker.hitbox[0] = Bunker.x + BUNKERW;
-	Bunker.hitbox[1] = Bunker.y - BUNKERH;
-	Bunker.y = 47 - PLAYERH;
-	Bunker.image[0] = Bunker0;
+	Bunker.x = 33;			// positions the bunker in the middle of the screen
+	Bunker.y = 47 - PLAYERH;	// positions the bunker just above the max y point of the player
+	Bunker.maxpoint[0] = Bunker.x + BUNKERW;
+	Bunker.maxpoint[1] = Bunker.y + BUNKERH;
+	Bunker.image[0] = Bunker0;	// no damage
+	Bunker.image[1] = Bunker1;	// slight damage
+	Bunker.image[2] = Bunker2;	// medium damage
+	Bunker.image[3] = Bunker3;	// destroyed
 	Bunker.life = 10;
 }
 
-void Bunker_Check(void){
-  if(Bunker.life < 7 && Bunker.life >= 4) {
-		Bunker.image[0] = Bunker1;
-	} else if(Bunker.life < 4 && Bunker.life >= 1) {
-		Bunker.image[0] = Bunker2;
-	} else if(Bunker.life == 0) {
-		Bunker.image[0] = Bunker3;
-	}
-}
-
+// **************Player_Init*********************
+// Initialize enemy ship in the middle/bottom of the screen (Nokia 5110 width = 84 pixels,
+// height = 48 pixels).
+// Input: none
+// Output: none
 void Player_Init(void){
-	Player.x = 32;
-	Player.hitbox[0] = Player.x + PLAYERW;
-	Player.hitbox[1] = Player.y - PLAYERH;
-	Player.y = 47;
-	Player.image[0] = PlayerShip0;
-  Player.life = 1;
+	Player.x = 32;	
+	Player.y = 47;		
+	Player.maxpoint[0] = Player.x + PLAYERW;
+	Player.maxpoint[1] = Player.y + PLAYERH;
+	Player.image[0] = PlayerShip0;		// no damage
+	Player.image[1] = BigExplosion0;	// destroyed
+	Player.life = 20;
+	Player.deathCounter = 3;			// counts down time to display explosion before displaying Game Over message
 }
 
+// **************Player_Move*********************
+// Update player x-position using ADC0 input from slider.
+// Input: x-coordinate ranging from 0-66 (84 pixels - PLAYERW = 66 pixels).
+// Output: none
 void Player_Move(unsigned int position){
 	Player.x = position;
+	Player.maxpoint[0] = Player.x + PLAYERW;
 }
 
-void Missile_Init(void){
-	Missile.x = Player.x + (PLAYERW/2);
-	Missile.hitbox[0] = Missile.x + MISSILEW;
-	Missile.hitbox[1] = Missile.y - MISSILEH;
-	Missile.y = Player.y - 2;
-	Missile.image[0] = Missile0;
-  Missile.life = 1;
+// **************Player_Missile_Init*********************
+// Initialize the player's missile.  Players can only launch 
+// one missile at a time.
+// Input: none
+// Output: none
+void Player_Missile_Init(void){
+	Missile[playMissile].x = Player.x + (PLAYERW/2);  
+	Missile[playMissile].y = Player.y - 4;		// initialize the missile 4 pixels above the ship
+	Missile[playMissile].maxpoint[0] = Missile[playMissile].x + MISSILEW;
+	Missile[playMissile].maxpoint[1] = Missile[playMissile].y + MISSILEH;
+	Missile[playMissile].image[0] = Missile0;		// full health
+	Missile[playMissile].image[1] = Missile2;		// no health (image is blank space)
+  Missile[playMissile].life = 1;
+	Missile[playMissile].deathCounter = 3;
+	GPIO_PORTE_DATA_R |= 0x10;				// turn on missile active light
 }
 
+// **************Enemy_Missile_Init*********************
+// Uses randomnum to randomize the initialization of enemy missiles.
+// Only enemies with no other enemies below can launch missiles.
+// Input: none
+// Output: none
+void Enemy_Missile_Init(void) {
+	int i;
+	for(i=0;i<numEnemies;i++) {
+		if((Enemy[i].life > 0) && (Missile[i].life <= 0) && ((i+2) == randomnum)) {
+			if((i >= 4) || (Enemy[i%4].life <= 0)) {		// if no other enemies directly below
+				Missile[i].x = Enemy[i].x + (ENEMY30W/2);
+				Missile[i].y = Enemy[i].y + 4;		// initialize the missile 4 pixels below the enemy
+				Missile[i].maxpoint[0] = Missile[i].x + MISSILEW;
+				Missile[i].maxpoint[1] = Missile[i].y + MISSILEH;
+				Missile[i].image[0] = Missile0;		// full health
+				Missile[i].image[1] = Missile2;		// no health (image is blank space)
+				Missile[i].life = 1;
+				Missile[i].deathCounter = 3;		// counts down time to display small explosion
+			}
+		}
+	}
+}
+
+// **************Missile_Move*********************
+// Move the player missile up the screen if it's health is not zero.
+// If the y-coordinate of the missile exceeds the maximum y-coordinate 
+// of the screen, reduce the missile's life to zero.
+// Input: none
+// Output: none
 void Missile_Move(void) {
-	if(Missile.y < 72 && Missile.life == 1){
-    Missile.y -= 4; // move up
-		Missile.image[0] = Missile0;
-  }else{
-    Missile.image[0] = Missile2;
-		missileFlag = 0;
-  }
+	if((Missile[playMissile].life == 1) && (Missile[playMissile].y <= 48)){
+		Missile[playMissile].y -= 3; // move up
+		Missile[playMissile].maxpoint[1] -= 3;
+	} else {
+		Missile[playMissile].life = 0;		// delete the missile if it moves off screen
+		GPIO_PORTE_DATA_R &= ~(0x10);				// turn off missile active light
+	}
 }
 
-void Laser_Init(void){
-	Laser.x = Player.x + (PLAYERW/2);
-	Laser.hitbox[0] = Laser.x + LASERW;
-	Laser.hitbox[1] = Laser.y - LASERH;
-	Laser.y = Player.y - 2;
-	Laser.image[0] = Laser0;
-  Laser.life = 1;
+// **************Enemy_Missile_Move*********************
+// Move the enemy missile up the screen if it's health is not zero.
+// If the y-coordinate of the missile exceeds the maximum y-coordinate 
+// of the screen, reduce the missile's life to zero.
+// Input: none
+// Output: none
+void Enemy_Missile_Move(void) {
+	int i;
+	for(i=0;i<numEnemies;i++) {
+		if((Missile[i].life == 1) && (Missile[i].y <= 48)) {
+			Missile[i].y += 3;	// move down
+			Missile[i].maxpoint[1] += 3;	// move down
+		} else {
+		Missile[i].life = 0;		// delete the missile if it moves off screen
+		}
+	}
 }
 
+// **************Player_Laser_Init*********************
+// Initialize the player's laser.  Players can only launch 
+// one laser at a time.
+// Input: none
+// Output: none
+void Player_Laser_Init(void){
+	Laser[playLaser].x = Player.x + (PLAYERW/2);
+	Laser[playLaser].y = Player.y - 4;		// initialize the laser 4 pixels above the ship
+	Laser[playLaser].maxpoint[0] = Laser[playLaser].x + LASERW;
+	Laser[playLaser].maxpoint[1] = Laser[playLaser].y + LASERH;
+	Laser[playLaser].image[0] = Laser0;			// full health
+	Laser[playLaser].image[1] = Laser1;			// no health (image is blank space)
+  Laser[playLaser].life = 1;
+	Laser[playLaser].deathCounter = 3;
+	Sound_Shoot();
+	GPIO_PORTE_DATA_R |= 0x20;				// turn on laser active light
+}
+
+// **************Enemy_Laser_Init*********************
+// Uses randomnum to randomize the initialization of enemy lasers.
+// Only enemies with no other enemies below can launch lasers.
+// Input: none
+// Output: none
+void Enemy_Laser_Init(void) {
+	int i;
+	for(i=0;i<numEnemies;i++) {
+		if((Enemy[i].life > 0) && (Laser[i].life <= 0) && ((i+3) == randomnum)) { 
+			if((i >= 4) || (Enemy[i%4].life <= 0)) {
+				Laser[i].x = Enemy[i].x + (ENEMY30W/2);
+				Laser[i].y = Enemy[i].y + 4;
+				Laser[i].maxpoint[0] = Laser[i].x + LASERW;
+				Laser[i].maxpoint[1] = Laser[i].y + LASERH;
+				Laser[i].image[0] = Laser0;			// full health
+				Laser[i].image[1] = Laser1;			// no health (image is blank space)
+				Laser[i].life = 1;
+				Laser[i].deathCounter = 3;			// counts down time to display small explosion
+			}
+		}
+	}
+}
+
+// **************Laser_Move*********************
+// Move the player laser up the screen if it's health is not zero.
+// If the y-coordinate of the laser exceeds the maximum y-coordinate 
+// of the screen, reduce the laser's life to zero.
+// Input: none
+// Output: none
 void Laser_Move(void) {
-	if(Laser.y < 72 && Laser.life == 1){
-    Laser.y -= 7; // move up
-		Laser.image[0] = Laser0;
-  }else{
-    Laser.image[0] = Laser1;
-		laserFlag = 0;
-  }
+	if((Laser[playLaser].life == 1) && (Laser[playLaser].y <= 48)){
+		Laser[playLaser].y -= 4; // move up
+		Laser[playLaser].maxpoint[1] -= 4; // move up
+	} else {
+		Laser[playLaser].life = 0;		// delete the laser if it moves off screen
+		GPIO_PORTE_DATA_R &= ~(0x20);				// turn off laser active light
+	}
 }
 
+// **************Enemy_Laser_Move*********************
+// Move the enemy laser up the screen if it's health is not zero.
+// If the y-coordinate of the laser exceeds the maximum y-coordinate 
+// of the screen, reduce the laser's life to zero.
+// Input: none
+// Output: none
+void Enemy_Laser_Move(void) {
+	int i;
+	for(i=0;i<numEnemies;i++) {
+		if((Laser[i].life == 1) && (Laser[i].y <= 48)) {
+			Laser[i].y += 4;		// move down
+			Laser[i].maxpoint[1] += 4;		// move down
+		} else {
+			Laser[i].life = 0;		// delete the laser if it moves off screen
+		}
+	}
+}
+
+// **************Check_Damage*********************
+// Checks whether a missile or laser has collided with an object.
+// If there is a colission, reduce the life of both the missile/laser
+// and the object.
+// Input: none
+// Output: none
+void Check_Damage(void){
+	int i, j;
+	// check whether a missile/laser has collided with the bunker
+	for(j=0;j<numEnemies;j++){
+		if((Missile[j].life == 1) && (Bunker.life > 0) && ((Bunker.x-2) <= Missile[j].x) && (Missile[j].x <= (Bunker.maxpoint[0]+2)) 
+				&& ((Bunker.y+10) <= Missile[j].maxpoint[1])){
+      Bunker.life -= 2;
+			Missile[j].life = 0;		// delete the missile
+		}
+		if((Laser[j].life == 1) && (Bunker.life > 0) && ((Bunker.x-2) <= Laser[j].x) && (Laser[j].x <= (Bunker.maxpoint[0]+2)) 
+				&& ((Bunker.y+10) <= Laser[j].maxpoint[1])){
+			Bunker.life -= 1;				
+			Laser[j].life = 0;		// delete the laser
+		}
+	}
+	if((Missile[playMissile].life == 1) && (Bunker.life > 0) && ((Bunker.x-2) <= Missile[playMissile].x) && (Missile[playMissile].x <= (Bunker.maxpoint[0]+2))) {
+    Bunker.life -= 2;
+		Missile[playMissile].life = 0;		// delete the missile
+		GPIO_PORTE_DATA_R &= ~(0x10);				// turn off missile active light
+	}
+	if((Laser[playMissile].life == 1) && (Bunker.life > 0) && ((Bunker.x-2) <= Laser[playLaser].x) && (Laser[playLaser].x <= (Bunker.maxpoint[0]+2))) {
+		Bunker.life -= 1;				
+		Laser[playLaser].life = 0;		// delete the laser
+		GPIO_PORTE_DATA_R &= ~(0x20);				// turn off laser active light
+	}
+	// check whether an enemy missile/laser has collided with the player
+	for(j=0;j<numEnemies;j++) {
+		if((Missile[j].life == 1) && (Player.x <= Missile[j].x) && (Missile[j].x <= Player.maxpoint[0]) 
+				&& (Player.y <= Missile[j].y) && (Missile[j].y <= Player.maxpoint[1])){
+			Player.life -= 2;
+			Missile[j].life = 0;		// delete the missile
+		}
+		if((Laser[j].life == 1) && (Player.x <= Laser[j].x) && (Laser[j].x <= Player.maxpoint[0]) && (Player.y <= Laser[j].y)
+				&& (Laser[j].y <= Player.maxpoint[1])){
+			Player.life -= 1;
+			Laser[j].life = 0;		// delete the laser
+		}
+	}
+	// check whether a player missile has collided with an enemy
+	for(i=0;i<numEnemies;i++) {
+		if((Missile[playMissile].life == 1) && (Enemy[i].life > 0) && (Enemy[i].x <= Missile[playMissile].x) && (Missile[playMissile].x <= Enemy[i].maxpoint[0])
+				&& (Enemy[i].y <= Missile[playMissile].y) && (Missile[playMissile].y <= Enemy[i].maxpoint[1])){
+			Enemy[i].life -= 2;
+			Missile[playMissile].life = 0;		// delete the missile
+			GPIO_PORTE_DATA_R &= ~(0x10);				// turn off missile active light
+			Sound_Killed();
+		}
+		
+		if((Laser[playLaser].life == 1) && (Enemy[i].life > 0) && (Enemy[i].x <= Laser[playLaser].x) && (Laser[playLaser].x <= Enemy[i].maxpoint[0]) 
+				&& (Enemy[i].y <= Laser[playLaser].y) && (Laser[playLaser].y <= Enemy[i].maxpoint[1])){
+			Enemy[i].life -= 1;
+			Laser[playLaser].life = 0;		// delete the laser
+			GPIO_PORTE_DATA_R &= ~(0x20);				// turn off laser active light
+			Sound_Killed();
+		}
+		// if the enemy has no life left display explosion image
+		if(Enemy[i].life <= 0) {
+			Enemy[i].image[0] = SmallExplosion0;
+			Enemy[i].image[1] = SmallExplosion1;
+			if(Enemy[i].deathCounter > 0) {
+				Enemy[i].deathCounter -= 1;
+			}
+		} 
+	}
+	// check whether a player missile/laser has collided with an enemy missile/laser
+	for(i=0;i<numEnemies;i++) {
+		if((Missile[playMissile].life == 1) && (Missile[i].x <= Missile[playMissile].x) && (Missile[playMissile].x <= Missile[i].maxpoint[0]) 	
+				&& (Missile[i].y <= Missile[playMissile].y) && (Missile[playMissile].y <= Missile[i].maxpoint[1])){
+			Missile[i].life = 0;								// delete enemy missile
+			Missile[playMissile].life = 0;			// delete player missile
+			GPIO_PORTE_DATA_R &= ~(0x10);				// turn off missile active light
+		}
+		
+		if((Laser[playLaser].life == 1) && (Laser[i].x <= Laser[playLaser].x) && (Laser[playLaser].x <= Laser[i].maxpoint[0]) 
+				&& (Laser[i].y <= Laser[playLaser].y) && (Laser[playLaser].y <= Laser[i].maxpoint[1])){
+			Laser[i].life = 0;						// delete enemy laser
+			Laser[playLaser].life = 0;		// delete player laser
+			GPIO_PORTE_DATA_R &= ~(0x20);				// turn off laser active light
+		}
+	}
+	// if the player has no life left display big explosion image
+	if(Player.life <= 0) {
+		Player.image[0] = BigExplosion0;
+		Player.image[1] = BigExplosion1;
+		if(Player.deathCounter > 0) {
+			Player.deathCounter -= 1;
+		}
+	}
+	
+	// check whether a player missile has collided with the UFO
+	if((Missile[playMissile].life == 1) && (UFO.life > 0) && (UFO.x <= Missile[playMissile].x) && (Missile[playMissile].x <= UFO.maxpoint[0])
+			&& (UFO.y <= Missile[playMissile].y) && (Missile[playMissile].y <= UFO.maxpoint[1])){
+		UFO.life -= 2;
+		Missile[playMissile].life = 0;		// delete the missile
+		GPIO_PORTE_DATA_R &= ~(0x10);				// turn off missile active light
+		Sound_Killed();
+	}
+		
+	if((Laser[playLaser].life == 1) && (UFO.life > 0) && (UFO.x <= Laser[playLaser].x) && (Laser[playLaser].x <= UFO.maxpoint[0])
+			&& (UFO.y <= Laser[playLaser].y) && (Laser[playLaser].y <= UFO.maxpoint[1])){
+		UFO.life -= 1;
+		Laser[playLaser].life = 0;		// delete the laser
+		GPIO_PORTE_DATA_R &= ~(0x20);				// turn off laser active light
+		Sound_Killed();
+	}
+			
+	if(UFO.life <= 0) {
+			UFO.image[0] = SmallExplosion0;
+			UFO.image[1] = SmallExplosion1;
+			if(UFO.deathCounter > 0) {
+				UFO.deathCounter -= 1;
+			}
+		}
+}
+
+// **************Draw*********************
+// Writes images to buffer if object has been initialized.
+// Input: none
+// Output: none
 void Draw(void){ int i;
   Nokia5110_ClearBuffer();
-  for(i=0;i<4;i++){
+	Check_Damage();			// check if any objects have been damaged or destroyed
+  for(i=0;i<numEnemies;i++){
     if(Enemy[i].life > 0){
-     Nokia5110_PrintBMP(Enemy[i].x, Enemy[i].y, Enemy[i].image[FrameCount], 0);
-    } else {
-		 Nokia5110_PrintBMP(Enemy[i].x, Enemy[i].y, Enemy[i].image[0], 0);
+      Nokia5110_PrintBMP(Enemy[i].x, Enemy[i].y, Enemy[i].image[FrameCount], 0);	// animate the enemies using 2 frames
+    } else if (Enemy[i].deathCounter > 0) {
+		  Nokia5110_PrintBMP(Enemy[i].x, Enemy[i].y, Enemy[i].image[0], 0);		// draw small explosion image
+		} else {
+			Nokia5110_PrintBMP(Enemy[i].x, Enemy[i].y, Enemy[i].image[1], 0);		// draw blank space
 		}
   }
-	Bunker_Check();
-	Nokia5110_PrintBMP(Bunker.x, Bunker.y, Bunker.image[0], 0);
-	Nokia5110_PrintBMP(Player.x, Player.y, Player.image[0], 0);
-	if(missileFlag == 1) {
-		Nokia5110_PrintBMP(Missile.x, Missile.y, Missile.image[0], 0);
+	
+	if(Bunker.life >= 7) {
+		Nokia5110_PrintBMP(Bunker.x, Bunker.y, Bunker.image[0], 0);		// draw full health bunker
+	} else if(Bunker.life < 7 && Bunker.life >= 4) {
+		Nokia5110_PrintBMP(Bunker.x, Bunker.y, Bunker.image[1], 0);		// draw slightly damaged bunker
+	} else if(Bunker.life < 4 && Bunker.life >= 1) {
+		Nokia5110_PrintBMP(Bunker.x, Bunker.y, Bunker.image[2], 0);		// draw moderately damaged bunker
+	} else if(Bunker.life <= 0) {
+		Nokia5110_PrintBMP(Bunker.x, Bunker.y, Bunker.image[3], 0);		// draw blank space
 	}
-	if(laserFlag == 1) {
-		Nokia5110_PrintBMP(Laser.x, Laser.y, Laser.image[0], 0);
+	
+	if(Player.life > 0){
+      Nokia5110_PrintBMP(Player.x, Player.y, Player.image[0], 0);		// draw full health player
+    } else if (Player.deathCounter > 0) {
+		  Nokia5110_PrintBMP(Player.x, Player.y, Player.image[0], 0);		// draw big explosion
+		} else {
+			Nokia5110_PrintBMP(Player.x, Player.y, Player.image[1], 0);		// draw blank space
+		}
+		
+	if(UFO.life > 0){
+      Nokia5110_PrintBMP(UFO.x, UFO.y, UFO.image[0], 0);		// draw full health UFO
+    } else if (UFO.deathCounter > 0) {
+		  Nokia5110_PrintBMP(UFO.x, UFO.y, UFO.image[0], 0);		// draw small explosion
+		} else {
+			Nokia5110_PrintBMP(UFO.x, UFO.y, UFO.image[1], 0);		// draw blank space
+		}
+	
+	for(i=0;i<(numEnemies+1);i++) {
+		if(Missile[i].life == 1) {
+			Nokia5110_PrintBMP(Missile[i].x, Missile[i].y, Missile[i].image[0], 0);		// draw missile
+		}
+		
+		if(Laser[i].life == 1) {
+			Nokia5110_PrintBMP(Laser[i].x, Laser[i].y, Laser[i].image[0], 0);		// draw laser
+		} 
 	}
+	
   Nokia5110_DisplayBuffer();      // draw buffer
 	FrameCount = (FrameCount+1)&0x01; // 0,1,0,1,...
 }
 
-// You can use this timer only if you learn how it works
-// period of 7272 = 11 kHz
-void Timer2_Init(unsigned long period){ 
-  unsigned long volatile delay;
-  SYSCTL_RCGCTIMER_R |= 0x04;   // 0) activate timer2
-  delay = SYSCTL_RCGCTIMER_R;
-  TimerCount = 0;
-  Semaphore2A = 0;
-  TIMER2_CTL_R = 0x00000000;    // 1) disable timer2A during setup
-  TIMER2_CFG_R = 0x00000000;    // 2) configure for 32-bit mode
-  TIMER2_TAMR_R = 0x00000002;   // 3) configure for periodic mode, default down-count settings
-  TIMER2_TAILR_R = period-1;    // 4) reload value
-  TIMER2_TAPR_R = 0;            // 5) bus clock resolution
-  TIMER2_ICR_R = 0x00000001;    // 6) clear timer2A timeout flag
-  TIMER2_IMR_R = 0x00000001;    // 7) arm timeout interrupt
-  NVIC_PRI5_R = (NVIC_PRI5_R&0x00FFFFFF)|0x80000000; // 8) priority 4
-// interrupts enabled in the main program after all devices initialized
-// vector number 39, interrupt number 23
-  NVIC_EN0_R = 1<<23;           // 9) enable IRQ 23 in NVIC
-  TIMER2_CTL_R = 0x00000001;    // 10) enable timer2A
-}
-
+// **************Delay100ms*********************
+// Input: none
+// Output: none
 void Delay100ms(unsigned long count){unsigned long volatile time;
   while(count>0){
     time = 727240;  // 0.1sec at 80 MHz
@@ -498,28 +838,72 @@ void Delay100ms(unsigned long count){unsigned long volatile time;
   }
 }
 
-// **************DAC_Init*********************
-// Initialize 4-bit DAC 
+// **************Delay1ms*********************
 // Input: none
 // Output: none
-void DAC_Init(void){
-	unsigned long delay;
-	SYSCTL_RCGC2_R |= SYSCTL_RCGC2_GPIOB; // activate port B
-  delay = SYSCTL_RCGC2_R;    // allow time to finish activating
-  GPIO_PORTB_AMSEL_R &= ~0x0F;      // no analog
-  GPIO_PORTB_PCTL_R &= ~0x0000FFFF; // regular GPIO function
-  GPIO_PORTB_DIR_R |= 0x0F;      // make PB3-0 out
-  GPIO_PORTB_AFSEL_R &= ~0x0F;   // disable alt funct on PB3-0
-  GPIO_PORTB_DEN_R |= 0x0F;      // enable digital I/O on PB3-0
-	GPIO_PORTB_DR8R_R |= 0x0F;		 // drive up to 8mA out
+void Delay1ms(unsigned long msec){
+	unsigned long i;
+  while(msec > 0){
+    i = 13333;  // approximately 1 ms at 80 MHz (1ms/12.5ns/6)
+    while(i > 0){
+      i = i - 1;
+    }
+    msec = msec - 1;
+  }
 }
 
-// **************DAC_Out*********************
-// output to DAC
-// Input: 4-bit data, 0 to 15 
+//------------Game_Over------------
+// Clear the Nokia screen and display the "Game Over" message when the player dies
+// Input: none
 // Output: none
-void DAC_Out(unsigned long data){
-  GPIO_PORTB_DATA_R = data;
+void Game_Over(void) {
+	Delay100ms(2);              // delay 200 msec at 50 MHz
+  Nokia5110_Clear();
+  Nokia5110_SetCursor(1, 1);
+  Nokia5110_OutString("GAME OVER");
+  Nokia5110_SetCursor(1, 2);
+  Nokia5110_OutString("Nice try,");
+  Nokia5110_SetCursor(1, 3);
+  Nokia5110_OutString("Earthling!");
+  while(1){
+  }
+}
+
+// **************Level_Check*********************
+// If all enemies have been eliminated, display Next Level message.
+// Input: none
+// Output: none
+void Level_Check(void){  
+	int i;
+	int enemiesDead = 0;
+	if(Player.life <= 0 && Player.deathCounter <= 0) {
+		Game_Over();		// display game over message
+	}
+	// check the number of enemies destroyed
+	for(i=0;i<numEnemies;i++) {		
+		if(Enemy[i].life <= 0) {
+			enemiesDead += 1;
+		}
+		// if enemies reach bottom of screen, game over
+		if((Enemy[i].maxpoint[1] >= Player.y) && (Enemy[i].life > 0)) {
+			Game_Over();
+		}
+	}
+	// if all enemies destroyed, move to next level
+	if(enemiesDead == numEnemies) {
+		currentLevel += 1;
+		enemyDir = currentLevel;
+		Delay100ms(2);              // delay 200 msec at 50 MHz
+		Nokia5110_Clear();
+		Nokia5110_SetCursor(1, 2);
+		Nokia5110_OutString("LEVEL");
+		Nokia5110_SetCursor(1, 6);
+		Nokia5110_OutUDec(currentLevel);
+		Delay100ms(5);              // delay 500 msec at 50 MHz
+		Enemy_Init();				// reset enemies
+		Bunker_Init();			// reset bunker
+		Player_Init();			// reset player
+	}
 }
 
 // **************Systick_Init*********************
@@ -530,7 +914,7 @@ void DAC_Out(unsigned long data){
 // reload value of 2666666 = 30 Hz
 void Systick_Init(void){
 	NVIC_ST_CTRL_R = 0;         // disable SysTick during setup
-  NVIC_ST_RELOAD_R = 2666666;// reload value
+  NVIC_ST_RELOAD_R = 2666;// reload value
   NVIC_ST_CURRENT_R = 0;      // any write to current clears it
   NVIC_SYS_PRI3_R = NVIC_SYS_PRI3_R&0x00FFFFFF; // priority 0
   NVIC_ST_CTRL_R = 0x0007; // enable,core clock, and interrupts
@@ -588,6 +972,13 @@ void Switch_Init(void){
   GPIO_PORTE_AFSEL_R &= ~0x03;     // 4) disable alternate function on PE1-PE0
   GPIO_PORTE_DEN_R |= 0x03;      // 5) enable digital I/O on PE1-PE0
   GPIO_PORTE_AMSEL_R &= ~0x03;     // 6) disable analog function on PE1-PE0
+	GPIO_PORTE_IS_R &= ~0x03;     // 7) PE1-PE0 is edge-sensitive
+  GPIO_PORTE_IBE_R &= ~0x03;    // 8)  PE1-PE0 is not both edges
+  GPIO_PORTE_IEV_R |= 0x03;    // 9)  PE1-PE0 rising edge event
+  GPIO_PORTE_ICR_R = 0x03;      // 10) clear flags 1,0
+  GPIO_PORTE_IM_R |= 0x03;      // 11) arm interrupt on PE1-PE0
+  NVIC_PRI1_R = (NVIC_PRI1_R&0xFFFFFF0F)|0x40; // 12) priority 2
+  NVIC_EN0_R = 0x10;      // 13) enable interrupt 4 in NVIC
 }
 
 //------------LED_Init------------
@@ -604,114 +995,98 @@ void LED_Init(void){
   GPIO_PORTE_AFSEL_R &= ~0x30;     // 4) disable alternate function on PB5-PB4
   GPIO_PORTE_DEN_R |= 0x30;      // 5) enable digital I/O on PB5-PB4
   GPIO_PORTE_AMSEL_R &= ~0x30;     // 6) disable analog function on PB5-PB4
+	GPIO_PORTE_DATA_R &= ~0X30;			//7) clear the data register for PB5-PB4
 }
 
 //********Convert****************
-// Convert a 12-bit binary ADC sample into a number from 0 to 72.  
+// Convert a 12-bit binary ADC sample into a number from 0 to 66.  
 // Calibration data is gathered using number of pixels of width of the Nokia5110
-// and reading the ADC value measured on PE1.  
+// and reading the ADC value measured on PE1. The width of the Nokia5110 is 84 pixels
+// and the width of the player ship BMP image is 18 pixels.
 // Overflow and dropout should be considered 
 // Input: sample  12-bit ADC sample
-// Output: integer between 0 and 72
+// Output: integer between 0 and 66
 unsigned int Convert(unsigned long sample){
-  return (72*sample)/4095;
-}
-
-//------------Game_Over------------
-// Clear the Nokia screen and display the "Game Over" message when the player dies
-// Input: none
-// Output: none
-void Game_Over(void) {
-	Delay100ms(50);              // delay 5 sec at 50 MHz
-  Nokia5110_Clear();
-  Nokia5110_SetCursor(1, 1);
-  Nokia5110_OutString("GAME OVER");
-  Nokia5110_SetCursor(1, 2);
-  Nokia5110_OutString("Nice try,");
-  Nokia5110_SetCursor(1, 3);
-  Nokia5110_OutString("Earthling!");
-  Nokia5110_SetCursor(2, 4);
-  Nokia5110_OutUDec(1234);
-  while(1){
-  }
+  return (66*sample)/4095;
 }
 
 void SysTick_Handler(void){  // runs at 30 Hz
+	int i;
 	ADCdata = ADC0_In();
 	playerPosition = Convert(ADCdata);
-	if(GPIO_PORTE_DATA_R == 0x01) {
-		Missile_Init();
-		missileFlag = 1;
-	} else if(GPIO_PORTE_DATA_R == 0x02) {
-		Laser_Init();
-		laserFlag = 1;
-	}
   playerFlag = 1;
 }
 
-void Timer2A_Stop(void){ 
-  TIMER2_CTL_R &= ~0x00000001; // disable
-}
-	
-void Timer2A_Start(void){ 
-  TIMER2_CTL_R |= 0x00000001;   // enable
-}
-
-void Timer2A_Handler(void){ 
-TIMER2_ICR_R = 0x00000001;  // acknowledge
-  if(Counter){
-    DAC_Out(Wave[Index]>>4); 
-    Index = Index + 1;
-    Counter = Counter - 1;
-  }else{
-    Timer2A_Stop();
-  }
-}
-
-void Sound_Play(const unsigned char *pt, unsigned long count){
-  Wave = pt;
-  Index = 0;
-  Counter = count;
-  Timer2A_Start();
+void GPIOPortE_Handler(void){
+  GPIO_PORTE_ICR_R = 0x03; // ack, clear interrupt flag 1,0
+  if(GPIO_PORTE_DATA_R == 0x01 && Missile[playMissile].life <= 0) {
+			missileFlag = 1;
+			randomnum += 3;
+			GPIO_PORTE_DATA_R = 0;
+		} else if(GPIO_PORTE_DATA_R == 0x02 && Laser[playLaser].life <= 0) {
+			laserFlag = 1;
+			randomnum += 5;
+			GPIO_PORTE_DATA_R = 0;
+		} else if(Missile[playMissile].life <= 0) {
+			missileFlag = 1;
+			randomnum += 7;
+			GPIO_PORTE_DATA_R = 0;
+		} else if(Laser[playLaser].life <= 0) {
+			laserFlag = 1;
+			randomnum += 9;
+			GPIO_PORTE_DATA_R = 0;
+		}
 }
 
 int main(void){
   TExaS_Init(SSI0_Real_Nokia5110_Scope);  // set system clock to 80 MHz
-  Random_Init(1);
 	Systick_Init();
 	ADC0_Init();
 	LED_Init();
 	Switch_Init();
   Nokia5110_Init();
-	Timer2_Init(7272);
+	Random_Init(1);
+	Sound_Init();
 	
   Nokia5110_ClearBuffer();
 	Nokia5110_DisplayBuffer();      // draw buffer
-
-  Player_Init();
-	Bunker_Init();
+	currentLevel = 1;
 	Enemy_Init();
+	Bunker_Init();
+  Player_Init();
   Draw();
-//  Nokia5110_PrintBMP(0, ENEMY10H - 1, SmallEnemy10PointA, 0);
-//  Nokia5110_PrintBMP(16, ENEMY10H - 1, SmallEnemy20PointA, 0);
-//  Nokia5110_PrintBMP(32, ENEMY10H - 1, SmallEnemy20PointA, 0);
-//  Nokia5110_PrintBMP(48, ENEMY10H - 1, SmallEnemy30PointA, 0);
-//  Nokia5110_PrintBMP(64, ENEMY10H - 1, SmallEnemy30PointA, 0);
-//  Nokia5110_DisplayBuffer();     // draw buffer
 
-  while(1){
+  while(1){;
+		randomnum = (Random32()>>24)%60; // a number from 0 to 59
+		Enemy_Missile_Init();
+		Enemy_Laser_Init();
+		Enemy_Missile_Move();
+		Enemy_Laser_Move();
+		Level_Check();
+
 		if(playerFlag == 1) {
 			Player_Move(playerPosition);
 			playerFlag = 0;
 		}
 		if(missileFlag == 1) {
-			Missile_Move();
+			Player_Missile_Init();
+			missileFlag = 0;
 		}
 		if(laserFlag == 1) {
+			Player_Laser_Init();
+			laserFlag = 0;
+		}
+		if(Missile[playMissile].life > 0) {
+			Missile_Move();
+		}
+		if(Laser[playLaser].life > 0) {
 			Laser_Move();
 		}
+		
 		Enemy_Move();
+		UFO_Move();
     Draw();
-    Delay100ms(2);
+		Delay1ms(25); //for simulation
+		//Delay1ms(300);	// for real board
   }
 }
